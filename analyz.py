@@ -77,37 +77,144 @@ def get_sample_data():
     }
     return pd.DataFrame(data)
 
+# Column mapping function
+def find_column_matches(df_columns):
+    """Find matching columns in the dataframe with flexible naming"""
+    column_map = {}
+    
+    # Define possible column name variations
+    column_variations = {
+        'ticker': ['Ticker', 'ticker', 'TICKER', 'Symbol', 'symbol', 'SYMBOL'],
+        'company': ['Company', 'company', 'COMPANY', 'Name', 'name', 'Company Name'],
+        'sector': ['Sector', 'sector', 'SECTOR', 'Industry', 'industry'],
+        'perf_week': ['Performance (Week)', 'Weekly Performance', 'Week Performance', 'Perf Week', '1W Performance', '1W Return'],
+        'perf_month': ['Performance (Month)', 'Monthly Performance', 'Month Performance', 'Perf Month', '1M Performance', '1M Return'],
+        'perf_quarter': ['Performance (Quarter)', 'Quarterly Performance', 'Quarter Performance', 'Perf Quarter', '3M Performance', '3M Return'],
+        'sales_growth': ['Sales Growth Quarter Over Quarter', 'Sales Growth QoQ', 'Sales Growth', 'Revenue Growth QoQ', 'Revenue Growth'],
+        'market_cap': ['Market Cap', 'Market Capitalization', 'MarketCap', 'Mkt Cap'],
+        'sma_20': ['20-Day Simple Moving Average', '20 Day SMA', '20-Day SMA', 'SMA 20', '20D SMA'],
+        'sma_50': ['50-Day Simple Moving Average', '50 Day SMA', '50-Day SMA', 'SMA 50', '50D SMA'],
+        'volume': ['Average Volume (3 month)', 'Avg Volume 3M', 'Volume 3M', 'Average Volume', 'Volume']
+    }
+    
+    # Find matches
+    for key, variations in column_variations.items():
+        for variation in variations:
+            if variation in df_columns:
+                column_map[key] = variation
+                break
+    
+    return column_map
+
+# Data cleaning and conversion function
+def clean_and_convert_data(df, column_map):
+    """Clean and convert data types for analysis"""
+    df = df.copy()
+    
+    # Define numeric column keys that should be converted
+    numeric_keys = ['perf_week', 'perf_month', 'perf_quarter', 'sales_growth', 
+                   'market_cap', 'sma_20', 'sma_50', 'volume']
+    
+    # Convert columns to numeric, handling errors
+    for key in numeric_keys:
+        if key in column_map:
+            col = column_map[key]
+            # Remove any % signs, commas, or other characters
+            if df[col].dtype == 'object':
+                df[col] = df[col].astype(str).str.replace('%', '').str.replace(',', '').str.replace('$', '')
+            
+            # Convert to numeric, invalid values become NaN
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Fill NaN values with 0 for calculation purposes
+            df[col] = df[col].fillna(0)
+    
+    return df
+
 # Momentum scoring function
 def calculate_momentum_score(df):
     """Calculate momentum score based on multiple factors"""
     df = df.copy()
     
-    # Normalize performance metrics (0-100 scale)
-    perf_cols = ['Performance (Week)', 'Performance (Month)', 'Performance (Quarter)']
-    for col in perf_cols:
-        df[f'{col}_norm'] = ((df[col] - df[col].min()) / (df[col].max() - df[col].min()) * 100).fillna(0)
+    # Find column mappings
+    column_map = find_column_matches(df.columns.tolist())
     
-    # Normalize sales growth
-    df['Sales_Growth_norm'] = ((df['Sales Growth Quarter Over Quarter'] - df['Sales Growth Quarter Over Quarter'].min()) / 
-                              (df['Sales Growth Quarter Over Quarter'].max() - df['Sales Growth Quarter Over Quarter'].min()) * 100).fillna(0)
+    # Clean and convert data first
+    df = clean_and_convert_data(df, column_map)
     
-    # Technical indicators score
-    df['Tech_Score'] = ((df['20-Day Simple Moving Average'] + df['50-Day Simple Moving Average']) / 2)
-    df['Tech_Score_norm'] = ((df['Tech_Score'] - df['Tech_Score'].min()) / (df['Tech_Score'].max() - df['Tech_Score'].min()) * 100).fillna(0)
+    # Initialize momentum score with base value
+    df['Momentum_Score'] = 50.0
     
-    # Volume score (higher volume = better liquidity)
-    df['Volume_Score_norm'] = ((df['Average Volume (3 month)'] - df['Average Volume (3 month)'].min()) / 
-                              (df['Average Volume (3 month)'].max() - df['Average Volume (3 month)'].min()) * 100).fillna(0)
-    
-    # Calculate weighted momentum score
-    df['Momentum_Score'] = (
-        df['Performance (Week)_norm'] * 0.15 +
-        df['Performance (Month)_norm'] * 0.15 +
-        df['Performance (Quarter)_norm'] * 0.10 +
-        df['Sales_Growth_norm'] * 0.30 +
-        df['Tech_Score_norm'] * 0.20 +
-        df['Volume_Score_norm'] * 0.10
-    ).round(2)
+    try:
+        score_components = []
+        weights = []
+        
+        # Performance metrics (if available)
+        perf_metrics = [
+            ('perf_week', 0.15, 'Weekly Performance'),
+            ('perf_month', 0.15, 'Monthly Performance'), 
+            ('perf_quarter', 0.10, 'Quarterly Performance')
+        ]
+        
+        for key, weight, name in perf_metrics:
+            if key in column_map:
+                col = column_map[key]
+                col_min = df[col].min()
+                col_max = df[col].max()
+                if col_max != col_min:  # Avoid division by zero
+                    normalized = ((df[col] - col_min) / (col_max - col_min) * 100)
+                    score_components.append(normalized * weight)
+                    weights.append(weight)
+        
+        # Sales growth (if available)
+        if 'sales_growth' in column_map:
+            col = column_map['sales_growth']
+            col_min = df[col].min()
+            col_max = df[col].max()
+            if col_max != col_min:
+                normalized = ((df[col] - col_min) / (col_max - col_min) * 100)
+                score_components.append(normalized * 0.30)
+                weights.append(0.30)
+        
+        # Technical indicators (if available)
+        tech_cols = []
+        if 'sma_20' in column_map:
+            tech_cols.append(column_map['sma_20'])
+        if 'sma_50' in column_map:
+            tech_cols.append(column_map['sma_50'])
+        
+        if tech_cols:
+            df['Tech_Score'] = df[tech_cols].mean(axis=1)
+            tech_min = df['Tech_Score'].min()
+            tech_max = df['Tech_Score'].max()
+            if tech_max != tech_min:
+                normalized = ((df['Tech_Score'] - tech_min) / (tech_max - tech_min) * 100)
+                score_components.append(normalized * 0.20)
+                weights.append(0.20)
+        
+        # Volume score (if available)
+        if 'volume' in column_map:
+            col = column_map['volume']
+            col_min = df[col].min()
+            col_max = df[col].max()
+            if col_max != col_min:
+                normalized = ((df[col] - col_min) / (col_max - col_min) * 100)
+                score_components.append(normalized * 0.10)
+                weights.append(0.10)
+        
+        # Calculate final momentum score
+        if score_components:
+            total_weight = sum(weights)
+            if total_weight > 0:
+                df['Momentum_Score'] = sum(score_components) / total_weight * 100
+            df['Momentum_Score'] = df['Momentum_Score'].round(2)
+        
+        # Store column mapping for later use
+        df.attrs['column_map'] = column_map
+        
+    except Exception as e:
+        st.warning(f"Warning in momentum calculation: {str(e)}")
+        # Keep default momentum score of 50.0
     
     return df
 
@@ -137,276 +244,363 @@ else:
         try:
             df = pd.read_csv(uploaded_file)
             st.sidebar.success("✅ File uploaded successfully!")
+            
+            # Show data preview
+            st.sidebar.subheader("📋 Data Preview")
+            st.sidebar.write(f"Rows: {len(df)}, Columns: {len(df.columns)}")
+            
+            # Show column detection
+            column_map = find_column_matches(df.columns.tolist())
+            st.sidebar.write("**Detected Columns:**")
+            for key, col in column_map.items():
+                st.sidebar.write(f"• {key}: {col}")
+            
+            missing_keys = set(['ticker']) - set(column_map.keys())
+            if missing_keys:
+                st.sidebar.warning(f"Missing: {', '.join(missing_keys)}")
+            
         except Exception as e:
             st.sidebar.error(f"❌ Error reading file: {str(e)}")
 
 if df is not None:
     # Calculate momentum scores
-    df = calculate_momentum_score(df)
-    
-    # Sidebar filters
-    st.sidebar.header("🎛️ Filters")
-    
-    # Sector filter
-    if 'Sector' in df.columns:
-        sectors = ['All'] + sorted(df['Sector'].unique().tolist())
-        selected_sector = st.sidebar.selectbox("Select Sector:", sectors)
+    try:
+        df = calculate_momentum_score(df)
+        column_map = getattr(df, 'attrs', {}).get('column_map', {})
         
-        if selected_sector != 'All':
-            df_filtered = df[df['Sector'] == selected_sector].copy()
+        # Sidebar filters
+        st.sidebar.header("🎛️ Filters")
+        
+        # Sector filter
+        if 'sector' in column_map:
+            sector_col = column_map['sector']
+            sectors = ['All'] + sorted(df[sector_col].unique().tolist())
+            selected_sector = st.sidebar.selectbox("Select Sector:", sectors)
+            
+            if selected_sector != 'All':
+                df_filtered = df[df[sector_col] == selected_sector].copy()
+            else:
+                df_filtered = df.copy()
         else:
             df_filtered = df.copy()
-    else:
-        df_filtered = df.copy()
-        selected_sector = 'All'
-    
-    # Top N stocks
-    top_n = st.sidebar.slider("Show Top N Stocks:", 5, min(50, len(df_filtered)), 10)
-    
-    # Sort by momentum score
-    df_filtered = df_filtered.sort_values('Momentum_Score', ascending=False)
-    
-    # Main content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["🎯 Top Picks", "📊 Performance Analysis", "🔍 Detailed View", "📈 Sector Analysis"])
-    
-    with tab1:
-        st.header("🎯 Top Stock Picks")
+            selected_sector = 'All'
         
-        # Display top stocks
-        top_stocks = df_filtered.head(top_n)
+        # Top N stocks
+        top_n = st.sidebar.slider("Show Top N Stocks:", 5, min(50, len(df_filtered)), 10)
         
-        # Metrics row
-        col1, col2, col3, col4 = st.columns(4)
+        # Sort by momentum score
+        df_filtered = df_filtered.sort_values('Momentum_Score', ascending=False)
         
-        with col1:
-            avg_momentum = top_stocks['Momentum_Score'].mean()
-            st.metric("Average Momentum Score", f"{avg_momentum:.1f}")
+        # Main content tabs
+        tab1, tab2, tab3, tab4 = st.tabs(["🎯 Top Picks", "📊 Performance Analysis", "🔍 Detailed View", "📈 Sector Analysis"])
         
-        with col2:
-            best_performer = top_stocks.iloc[0]['Performance (Quarter)']
-            st.metric("Best Quarterly Performance", f"{best_performer:.1f}%")
-        
-        with col3:
-            avg_sales_growth = top_stocks['Sales Growth Quarter Over Quarter'].mean()
-            st.metric("Avg Sales Growth", f"{avg_sales_growth:.1f}%")
-        
-        with col4:
-            total_stocks = len(df_filtered)
-            st.metric("Total Stocks Analyzed", total_stocks)
-        
-        st.markdown("---")
-        
-        # Top picks table
-        display_cols = ['Ticker', 'Company', 'Sector', 'Momentum_Score', 
-                       'Performance (Quarter)', 'Sales Growth Quarter Over Quarter', 'Market Cap']
-        
-        if all(col in top_stocks.columns for col in display_cols):
+        with tab1:
+            st.header("🎯 Top Stock Picks")
+            
+            # Display top stocks
+            top_stocks = df_filtered.head(top_n)
+            
+            # Metrics row
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                avg_momentum = top_stocks['Momentum_Score'].mean()
+                st.metric("Average Momentum Score", f"{avg_momentum:.1f}")
+            
+            with col2:
+                if 'perf_quarter' in column_map:
+                    best_performer = top_stocks[column_map['perf_quarter']].max()
+                    st.metric("Best Quarterly Performance", f"{best_performer:.1f}%")
+                else:
+                    st.metric("Best Quarterly Performance", "N/A")
+            
+            with col3:
+                if 'sales_growth' in column_map:
+                    avg_sales_growth = top_stocks[column_map['sales_growth']].mean()
+                    st.metric("Avg Sales Growth", f"{avg_sales_growth:.1f}%")
+                else:
+                    st.metric("Avg Sales Growth", "N/A")
+            
+            with col4:
+                total_stocks = len(df_filtered)
+                st.metric("Total Stocks Analyzed", total_stocks)
+            
+            st.markdown("---")
+            
+            # Top picks table
+            display_cols = []
+            
+            # Add available columns
+            if 'ticker' in column_map:
+                display_cols.append(column_map['ticker'])
+            if 'company' in column_map:
+                display_cols.append(column_map['company'])
+            if 'sector' in column_map:
+                display_cols.append(column_map['sector'])
+            
+            display_cols.append('Momentum_Score')
+            
+            if 'perf_quarter' in column_map:
+                display_cols.append(column_map['perf_quarter'])
+            if 'sales_growth' in column_map:
+                display_cols.append(column_map['sales_growth'])
+            if 'market_cap' in column_map:
+                display_cols.append(column_map['market_cap'])
+            
             display_df = top_stocks[display_cols].copy()
-            display_df['Market Cap'] = display_df['Market Cap'].apply(lambda x: f"${x:,.0f}M")
-            display_df = display_df.rename(columns={
-                'Momentum_Score': 'Momentum Score',
-                'Performance (Quarter)': 'Q Performance (%)',
-                'Sales Growth Quarter Over Quarter': 'Sales Growth (%)'
-            })
+            
+            # Format Market Cap if it exists
+            if 'market_cap' in column_map and column_map['market_cap'] in display_df.columns:
+                display_df[column_map['market_cap']] = display_df[column_map['market_cap']].apply(
+                    lambda x: f"${x:,.0f}M" if pd.notnull(x) and x > 0 else "N/A"
+                )
+            
+            # Rename columns for display
+            display_names = {}
+            if 'ticker' in column_map:
+                display_names[column_map['ticker']] = 'Ticker'
+            if 'company' in column_map:
+                display_names[column_map['company']] = 'Company'
+            if 'sector' in column_map:
+                display_names[column_map['sector']] = 'Sector'
+            display_names['Momentum_Score'] = 'Momentum Score'
+            if 'perf_quarter' in column_map:
+                display_names[column_map['perf_quarter']] = 'Q Performance (%)'
+            if 'sales_growth' in column_map:
+                display_names[column_map['sales_growth']] = 'Sales Growth (%)'
+            if 'market_cap' in column_map:
+                display_names[column_map['market_cap']] = 'Market Cap'
+            
+            display_df = display_df.rename(columns=display_names)
             
             st.dataframe(
                 display_df,
                 use_container_width=True,
                 hide_index=True
             )
-        
-        # Download button
-        csv_buffer = io.StringIO()
-        top_stocks.to_csv(csv_buffer, index=False)
-        st.download_button(
-            label="📥 Download Top Picks CSV",
-            data=csv_buffer.getvalue(),
-            file_name=f"top_{top_n}_momentum_stocks.csv",
-            mime="text/csv"
-        )
-    
-    with tab2:
-        st.header("📊 Performance Analysis")
-        
-        # Performance charts
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Momentum score distribution
-            fig_hist = px.histogram(
-                df_filtered.head(20), 
-                x='Momentum_Score',
-                title="Momentum Score Distribution",
-                nbins=10,
-                color_discrete_sequence=['#1f77b4']
+            
+            # Download button
+            csv_buffer = io.StringIO()
+            top_stocks.to_csv(csv_buffer, index=False)
+            st.download_button(
+                label="📥 Download Top Picks CSV",
+                data=csv_buffer.getvalue(),
+                file_name=f"top_{top_n}_momentum_stocks.csv",
+                mime="text/csv"
             )
-            fig_hist.update_layout(height=400)
-            st.plotly_chart(fig_hist, use_container_width=True)
         
-        with col2:
-            # Performance comparison
-            top_10 = df_filtered.head(10)
-            fig_bar = px.bar(
-                top_10,
-                x='Ticker',
-                y='Performance (Quarter)',
-                title="Top 10 Quarterly Performance",
-                color='Performance (Quarter)',
-                color_continuous_scale='viridis'
-            )
-            fig_bar.update_layout(height=400)
-            st.plotly_chart(fig_bar, use_container_width=True)
-        
-        # Correlation heatmap
-        st.subheader("📈 Performance Metrics Correlation")
-        numeric_cols = ['Performance (Week)', 'Performance (Month)', 'Performance (Quarter)',
-                       'Sales Growth Quarter Over Quarter', 'Momentum_Score']
-        
-        if all(col in df_filtered.columns for col in numeric_cols):
-            corr_matrix = df_filtered[numeric_cols].corr()
+        with tab2:
+            st.header("📊 Performance Analysis")
             
-            fig_heatmap = px.imshow(
-                corr_matrix,
-                title="Correlation Matrix of Key Metrics",
-                color_continuous_scale='RdBu',
-                aspect='auto'
-            )
-            fig_heatmap.update_layout(height=500)
-            st.plotly_chart(fig_heatmap, use_container_width=True)
-    
-    with tab3:
-        st.header("🔍 Detailed Stock Analysis")
-        
-        # Stock selector
-        stock_options = df_filtered['Ticker'].tolist()
-        selected_stock = st.selectbox("Select a stock for detailed analysis:", stock_options)
-        
-        if selected_stock:
-            stock_data = df_filtered[df_filtered['Ticker'] == selected_stock].iloc[0]
-            
-            # Stock info
-            col1, col2 = st.columns([2, 1])
-            
-            with col1:
-                st.subheader(f"{stock_data['Company']} ({selected_stock})")
-                st.write(f"**Sector:** {stock_data.get('Sector', 'N/A')}")
-                st.write(f"**Market Cap:** ${stock_data.get('Market Cap', 0):,.0f}M")
-            
-            with col2:
-                st.metric(
-                    "Momentum Score",
-                    f"{stock_data['Momentum_Score']:.1f}",
-                    delta=f"Rank #{df_filtered[df_filtered['Ticker'] == selected_stock].index[0] + 1}"
-                )
-            
-            # Performance metrics
-            st.subheader("📊 Performance Breakdown")
-            
-            perf_cols = st.columns(3)
-            with perf_cols[0]:
-                st.metric("Weekly Performance", f"{stock_data['Performance (Week)']:.1f}%")
-            with perf_cols[1]:
-                st.metric("Monthly Performance", f"{stock_data['Performance (Month)']:.1f}%")
-            with perf_cols[2]:
-                st.metric("Quarterly Performance", f"{stock_data['Performance (Quarter)']:.1f}%")
-            
-            # Additional metrics
-            st.subheader("📈 Additional Metrics")
-            
-            add_cols = st.columns(2)
-            with add_cols[0]:
-                st.metric("Sales Growth (QoQ)", f"{stock_data['Sales Growth Quarter Over Quarter']:.1f}%")
-                st.metric("20-Day SMA", f"{stock_data['20-Day Simple Moving Average']:.1f}%")
-            with add_cols[1]:
-                st.metric("50-Day SMA", f"{stock_data['50-Day Simple Moving Average']:.1f}%")
-                st.metric("Avg Volume (3M)", f"{stock_data['Average Volume (3 month)']:,.0f}")
-    
-    with tab4:
-        st.header("📈 Sector Analysis")
-        
-        if 'Sector' in df.columns:
-            # Sector performance summary
-            sector_summary = df.groupby('Sector').agg({
-                'Momentum_Score': ['mean', 'count'],
-                'Performance (Quarter)': 'mean',
-                'Sales Growth Quarter Over Quarter': 'mean',
-                'Market Cap': 'sum'
-            }).round(2)
-            
-            sector_summary.columns = ['Avg Momentum Score', 'Stock Count', 'Avg Q Performance', 'Avg Sales Growth', 'Total Market Cap']
-            sector_summary = sector_summary.sort_values('Avg Momentum Score', ascending=False)
-            
-            st.subheader("🏆 Sector Performance Rankings")
-            st.dataframe(sector_summary, use_container_width=True)
-            
-            # Sector charts
+            # Performance charts
             col1, col2 = st.columns(2)
             
             with col1:
-                fig_sector_momentum = px.bar(
-                    sector_summary.reset_index(),
-                    x='Sector',
-                    y='Avg Momentum Score',
-                    title="Average Momentum Score by Sector",
-                    color='Avg Momentum Score',
-                    color_continuous_scale='viridis'
+                # Momentum score distribution
+                fig_hist = px.histogram(
+                    df_filtered.head(20), 
+                    x='Momentum_Score',
+                    title="Momentum Score Distribution",
+                    nbins=10,
+                    color_discrete_sequence=['#1f77b4']
                 )
-                fig_sector_momentum.update_xaxes(tickangle=45)
-                fig_sector_momentum.update_layout(height=400)
-                st.plotly_chart(fig_sector_momentum, use_container_width=True)
+                fig_hist.update_layout(height=400)
+                st.plotly_chart(fig_hist, use_container_width=True)
             
             with col2:
-                fig_sector_count = px.pie(
-                    sector_summary.reset_index(),
-                    values='Stock Count',
-                    names='Sector',
-                    title="Stock Distribution by Sector"
+                # Performance comparison
+                if 'perf_quarter' in column_map and 'ticker' in column_map:
+                    top_10 = df_filtered.head(10)
+                    fig_bar = px.bar(
+                        top_10,
+                        x=column_map['ticker'],
+                        y=column_map['perf_quarter'],
+                        title="Top 10 Quarterly Performance",
+                        color=column_map['perf_quarter'],
+                        color_continuous_scale='viridis'
+                    )
+                    fig_bar.update_layout(height=400)
+                    st.plotly_chart(fig_bar, use_container_width=True)
+                else:
+                    st.info("Quarterly performance or ticker data not available")
+            
+            # Correlation heatmap
+            st.subheader("📈 Performance Metrics Correlation")
+            numeric_cols = ['Momentum_Score']
+            
+            # Add available numeric columns
+            for key in ['perf_week', 'perf_month', 'perf_quarter', 'sales_growth']:
+                if key in column_map:
+                    numeric_cols.append(column_map[key])
+            
+            if len(numeric_cols) > 1:
+                corr_matrix = df_filtered[numeric_cols].corr()
+                
+                fig_heatmap = px.imshow(
+                    corr_matrix,
+                    title="Correlation Matrix of Key Metrics",
+                    color_continuous_scale='RdBu',
+                    aspect='auto'
                 )
-                fig_sector_count.update_layout(height=400)
-                st.plotly_chart(fig_sector_count, use_container_width=True)
-        else:
-            st.info("Sector information not available in the dataset.")
-
-else:
-    # Welcome message
-    st.markdown("""
-    ## 👋 Welcome to Stock Momentum Analyzer!
+                fig_heatmap.update_layout(height=500)
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+            else:
+                st.info("Not enough numeric columns for correlation analysis")
+        
+        with tab3:
+            st.header("🔍 Detailed Stock Analysis")
+            
+            # Stock selector
+            if 'ticker' in column_map:
+                ticker_col = column_map['ticker']
+                stock_options = df_filtered[ticker_col].tolist()
+                selected_stock = st.selectbox("Select a stock for detailed analysis:", stock_options)
+                
+                if selected_stock:
+                    stock_data = df_filtered[df_filtered[ticker_col] == selected_stock].iloc[0]
+                    
+                    # Stock info
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        if 'company' in column_map:
+                            company_name = stock_data[column_map['company']]
+                            st.subheader(f"{company_name} ({selected_stock})")
+                        else:
+                            st.subheader(f"{selected_stock}")
+                        
+                        if 'sector' in column_map:
+                            st.write(f"**Sector:** {stock_data[column_map['sector']]}")
+                        if 'market_cap' in column_map:
+                            st.write(f"**Market Cap:** ${stock_data[column_map['market_cap']]:,.0f}M")
+                    
+                    with col2:
+                        rank = df_filtered[df_filtered[ticker_col] == selected_stock].index[0] + 1
+                        st.metric(
+                            "Momentum Score",
+                            f"{stock_data['Momentum_Score']:.1f}",
+                            delta=f"Rank #{rank}"
+                        )
+                    
+                    # Performance metrics
+                    st.subheader("📊 Performance Breakdown")
+                    
+                    perf_cols = st.columns(3)
+                    perf_metrics = [
+                        ('perf_week', 'Weekly Performance'),
+                        ('perf_month', 'Monthly Performance'),
+                        ('perf_quarter', 'Quarterly Performance')
+                    ]
+                    
+                    for i, (key, display_name) in enumerate(perf_metrics):
+                        with perf_cols[i]:
+                            if key in column_map:
+                                value = stock_data[column_map[key]]
+                                st.metric(display_name, f"{value:.1f}%")
+                            else:
+                                st.metric(display_name, "N/A")
+                    
+                    # Additional metrics
+                    st.subheader("📈 Additional Metrics")
+                    
+                    add_cols = st.columns(2)
+                    with add_cols[0]:
+                        if 'sales_growth' in column_map:
+                            value = stock_data[column_map['sales_growth']]
+                            st.metric("Sales Growth (QoQ)", f"{value:.1f}%")
+                        if 'sma_20' in column_map:
+                            value = stock_data[column_map['sma_20']]
+                            st.metric("20-Day SMA", f"{value:.1f}%")
+                    with add_cols[1]:
+                        if 'sma_50' in column_map:
+                            value = stock_data[column_map['sma_50']]
+                            st.metric("50-Day SMA", f"{value:.1f}%")
+                        if 'volume' in column_map:
+                            value = stock_data[column_map['volume']]
+                            st.metric("Avg Volume (3M)", f"{value:,.0f}")
+            else:
+                st.error("Ticker column not found in the data")
+        
+        with tab4:
+            st.header("📈 Sector Analysis")
+            
+            if 'sector' in column_map:
+                sector_col = column_map['sector']
+                
+                # Sector performance summary
+                agg_dict = {'Momentum_Score': ['mean', 'count']}
+                
+                # Add available columns to aggregation
+                if 'perf_quarter' in column_map:
+                    agg_dict[column_map['perf_quarter']] = 'mean'
+                if 'sales_growth' in column_map:
+                    agg_dict[column_map['sales_growth']] = 'mean'
+                if 'market_cap' in column_map:
+                    agg_dict[column_map['market_cap']] = 'sum'
+                
+                sector_summary = df.groupby(sector_col).agg(agg_dict).round(2)
+                
+                # Flatten column names
+                sector_summary.columns = ['_'.join(col).strip() for col in sector_summary.columns.values]
+                sector_summary = sector_summary.rename(columns={
+                    'Momentum_Score_mean': 'Avg Momentum Score',
+                    'Momentum_Score_count': 'Stock Count'
+                })
+                
+                # Rename other columns if they exist
+                for key in ['perf_quarter', 'sales_growth', 'market_cap']:
+                    if key in column_map:
+                        old_name = f"{column_map[key]}_mean"
+                        if old_name in sector_summary.columns:
+                            if key == 'perf_quarter':
+                                sector_summary = sector_summary.rename(columns={old_name: 'Avg Q Performance'})
+                            elif key == 'sales_growth':
+                                sector_summary = sector_summary.rename(columns={old_name: 'Avg Sales Growth'})
+                        
+                        old_name = f"{column_map[key]}_sum"
+                        if old_name in sector_summary.columns:
+                            if key == 'market_cap':
+                                sector_summary = sector_summary.rename(columns={old_name: 'Total Market Cap'})
+                
+                sector_summary = sector_summary.sort_values('Avg Momentum Score', ascending=False)
+                
+                st.subheader("🏆 Sector Performance Rankings")
+                st.dataframe(sector_summary, use_container_width=True)
+                
+                # Sector charts
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    fig_sector_momentum = px.bar(
+                        sector_summary.reset_index(),
+                        x=sector_col,
+                        y='Avg Momentum Score',
+                        title="Average Momentum Score by Sector",
+                        color='Avg Momentum Score',
+                        color_continuous_scale='viridis'
+                    )
+                    fig_sector_momentum.update_xaxes(tickangle=45)
+                    fig_sector_momentum.update_layout(height=400)
+                    st.plotly_chart(fig_sector_momentum, use_container_width=True)
+                
+                with col2:
+                    fig_sector_count = px.pie(
+                        sector_summary.reset_index(),
+                        values='Stock Count',
+                        names=sector_col,
+                        title="Stock Distribution by Sector"
+                    )
+                    fig_sector_count.update_layout(height=400)
+                    st.plotly_chart(fig_sector_count, use_container_width=True)
+            else:
+                st.info("Sector information not available in the dataset.")
     
-    This tool helps you identify high-momentum stocks using advanced scoring algorithms.
-    
-    ### 🚀 Features:
-    - **Momentum Scoring**: Weighted algorithm considering performance, growth, and technical indicators
-    - **Interactive Charts**: Visualize stock performance and correlations
-    - **Sector Analysis**: Compare performance across different sectors
-    - **Export Functionality**: Download your analysis results
-    
-    ### 📊 Getting Started:
-    1. Choose **"Use Sample Data"** to explore the tool with demo data
-    2. Or **"Upload CSV File"** to analyze your own stock data
-    
-    ### 📋 Required CSV Columns:
-    - `Ticker`: Stock symbol
-    - `Company`: Company name
-    - `Sector`: Industry sector
-    - `Performance (Week)`: Weekly return %
-    - `Performance (Month)`: Monthly return %
-    - `Performance (Quarter)`: Quarterly return %
-    - `Sales Growth Quarter Over Quarter`: QoQ sales growth %
-    - `Market Cap`: Market capitalization
-    - `20-Day Simple Moving Average`: 20-day SMA %
-    - `50-Day Simple Moving Average`: 50-day SMA %
-    - `Average Volume (3 month)`: 3-month average volume
-    
-    **Select a data source from the sidebar to begin your analysis!**
-    """)
-
-# Footer
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; color: #666; padding: 1rem;'>
-        📈 Stock Momentum Analyzer | Built with Streamlit
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    except Exception as e:
+        st.error(f"An error occurred while processing the data: {str(e)}")
+        st.info("Please check your data format and try again.")
+        
+        # Complete debug information section
+        if st.checkbox("Show debug information"):
+            st.write("**Available columns:**", df.columns.tolist())
+            st.write("**Data types:**")
+            
